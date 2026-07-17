@@ -1,9 +1,17 @@
 'use strict';
 
 /*
-  Efficient filled-leaf clock for NVIDIA Shield signage.
-  No p5.js. The visible canvas is 1920x402 and CSS scales it to 3840x804.
-  Leaves use the exact sprite_32.png silhouette.
+  Particle Clock v5
+  Efficient vanilla Canvas build for NVIDIA Shield signage.
+
+  Restored from the original visual behaviour:
+  - leaves occupy the filled digit area
+  - thin architectural outlines move, fade and morph continuously
+  - leaves jump and grow briefly on every second
+  - digit transitions crossfade and become more unstable
+
+  Main digits and leaf atlas are pre-rendered assets. The Shield does not need
+  to rasterise the large font, recolour sprites, or build masks at startup.
 */
 
 const PROFILE = 'shield';
@@ -11,16 +19,20 @@ const PROFILES = {
   shield: {
     particlesPerZone: 220,
     targetFps: 30,
-    maskSpacing: 10,
-    blueprintLayers: 4,
-    leafSizes: [15, 18, 21, 24]
+    blueprintLayers: 15,
+    maxSpeed: 4.1,
+    steering: 0.14,
+    damping: 0.84,
+    driftAmount: 2.4
   },
-  balanced: {
-    particlesPerZone: 240,
-    targetFps: 30,
-    maskSpacing: 9,
-    blueprintLayers: 5,
-    leafSizes: [15, 18, 21, 24]
+  safe: {
+    particlesPerZone: 180,
+    targetFps: 24,
+    blueprintLayers: 12,
+    maxSpeed: 3.8,
+    steering: 0.14,
+    damping: 0.84,
+    driftAmount: 2.0
   }
 };
 
@@ -28,21 +40,50 @@ const CFG = PROFILES[PROFILE];
 const BASE_W = 1920;
 const BASE_H = 402;
 const ZONE_W = BASE_W / 4;
+const DIGIT_Y = 222; // lowered to prevent the top of tall digits being clipped
 const FRAME_MS = 1000 / CFG.targetFps;
 const PARTICLES_PER_ZONE = CFG.particlesPerZone;
 const TOTAL_PARTICLES = PARTICLES_PER_ZONE * 4;
-const DIGIT_Y = 194;
-const FALLBACK_DIGIT_FONT = '900 468px "Arial Black", Impact, sans-serif';
-const LEAF_COLOURS = ['#89C925','#7FB832','#6FA13D','#577740','#9AD83A','#789A46','#A5D95A','#4F6A3C'];
-const ROTATIONS = 12;
-const TILE = 32;
-const ATLAS_COLS = 24;
 const BG = '#1C1B1C';
 
-const staticCanvas = document.getElementById('static-layer');
+const OUTLINE_TILE_W = 360;
+const OUTLINE_TILE_H = 480;
+const OUTLINE_OFFSET = 15;
+const OUTLINE_ROTATION = 0.16;
+const OUTLINE_SCALE = 0.11;
+const TRANSITION_MS = 1850;
+
+const LEAF_TILE = 40;
+const LEAF_ATLAS_COLS = 32;
+const LEAF_ROTATIONS = 8;
+const LEAF_COLOURS = 8;
+const LEAF_SIZES = 4;
+const LEAF_PULSE_LEVELS = 3;
+
+// ============================================================
+// HEARTBEAT TUNING
+// Edit only these values to tune the once-per-second pulse.
+// You can also change them live in the browser console through:
+// window.HEARTBEAT_CONFIG
+// ============================================================
+const HEARTBEAT = {
+  durationMs: 135,       // Beat length. Try 100 to 220.
+  peak: 0.72,            // Master intensity. Try 0.50 to 0.85.
+  curve: 3.0,            // Higher = sharper/faster falloff. Try 2.0 to 4.5.
+  scaleBoost: 0.55,      // Leaf size growth. Effective visible growth is about 20% with peak 0.72.
+  joltForce: 4.4,        // Leaf movement away from targets. Try 2.0 to 6.0.
+  settleDamping: 0.84    // Lower settles faster. Try 0.78 to 0.90.
+};
+
+window.HEARTBEAT_CONFIG = HEARTBEAT;
+
+const layoutCanvas = document.getElementById('layout-layer');
+const blueprintCanvas = document.getElementById('blueprint-layer');
 const leafCanvas = document.getElementById('leaf-layer');
-const staticCtx = staticCanvas.getContext('2d', { alpha: false });
+const layoutCtx = layoutCanvas.getContext('2d', { alpha: false });
+const blueprintCtx = blueprintCanvas.getContext('2d', { alpha: true, desynchronized: true });
 const leafCtx = leafCanvas.getContext('2d', { alpha: true, desynchronized: true });
+blueprintCtx.imageSmoothingEnabled = true;
 leafCtx.imageSmoothingEnabled = true;
 
 const x = new Float32Array(TOTAL_PARTICLES);
@@ -53,25 +94,33 @@ const vx = new Float32Array(TOTAL_PARTICLES);
 const vy = new Float32Array(TOTAL_PARTICLES);
 const phase = new Float32Array(TOTAL_PARTICLES);
 const spin = new Float32Array(TOTAL_PARTICLES);
-const baseRot = new Uint8Array(TOTAL_PARTICLES);
+const baseRotation = new Uint8Array(TOTAL_PARTICLES);
 const colourIndex = new Uint8Array(TOTAL_PARTICLES);
 const sizeIndex = new Uint8Array(TOTAL_PARTICLES);
-const targetsByDigit = new Array(10);
 
-let digitFont = FALLBACK_DIGIT_FONT;
+const currentDigits = ['', '', '', ''];
+const previousDigits = ['', '', '', ''];
+const transitionStarted = new Float64Array(4);
+
+let targetData = null;
+let outlineGrey = null;
+let outlineGreen = null;
+let leafAtlas = null;
 let footerFont = '700 20px Georgia, serif';
 let sideFont = '600 8px Arial, sans-serif';
-let atlasSource = null;
-let currentDigits = ['', '', '', ''];
 let lastSecond = -1;
-let pulse = 0;
+let heartbeatStarted = -10000;
+let heartbeatSequence = 0;
 let lastFrame = 0;
-let leafImage = null;
+
 const DEBUG = new URLSearchParams(location.search).get('debug') === '1';
 const debugElement = document.getElementById('debug');
 let debugFrames = 0;
-let debugStart = performance.now();
-let debugDrawAverage = 0;
+let debugStarted = performance.now();
+let leafDrawAverage = 0;
+let blueprintDrawAverage = 0;
+window.clockStats = { fps: 0, leafMs: 0, blueprintMs: 0, leaves: TOTAL_PARTICLES };
+window.forceHeartbeat = () => triggerHeartbeat(performance.now());
 if (DEBUG) debugElement.hidden = false;
 
 function seededRandom(seed) {
@@ -83,143 +132,79 @@ function seededRandom(seed) {
   };
 }
 
-async function loadFont(name, url, cssValue) {
-  if (!('FontFace' in window)) return false;
-  try {
-    const face = new FontFace(name, `url(${url})`);
-    await face.load();
-    document.fonts.add(face);
-    if (name === 'ClockMain') digitFont = `468px "${name}"`;
-    if (name === 'ClockFooter') footerFont = `20px "${name}"`;
-    if (name === 'ClockSide') sideFont = `8px "${name}"`;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function loadImage(url) {
   return new Promise((resolve, reject) => {
     const image = new Image();
+    image.decoding = 'async';
     image.onload = () => resolve(image);
     image.onerror = reject;
     image.src = url;
   });
 }
 
-function buildAtlas() {
-  const sizes = CFG.leafSizes;
-  const spriteCount = LEAF_COLOURS.length * sizes.length * ROTATIONS;
-  const rows = Math.ceil(spriteCount / ATLAS_COLS);
-  const atlas = document.createElement('canvas');
-  atlas.width = ATLAS_COLS * TILE;
-  atlas.height = rows * TILE;
-  const ctx = atlas.getContext('2d');
-
-  const colouredLeaves = LEAF_COLOURS.map(colour => {
-    const recoloured = document.createElement('canvas');
-    recoloured.width = TILE;
-    recoloured.height = TILE;
-    const c = recoloured.getContext('2d');
-    c.drawImage(leafImage, 0, 0, TILE, TILE);
-    c.globalCompositeOperation = 'source-in';
-    c.fillStyle = colour;
-    c.fillRect(0, 0, TILE, TILE);
-    c.globalCompositeOperation = 'source-over';
-    return recoloured;
-  });
-
-  let sprite = 0;
-  for (let colour = 0; colour < LEAF_COLOURS.length; colour++) {
-    for (let size = 0; size < sizes.length; size++) {
-      for (let rotation = 0; rotation < ROTATIONS; rotation++) {
-        const cellX = (sprite % ATLAS_COLS) * TILE;
-        const cellY = Math.floor(sprite / ATLAS_COLS) * TILE;
-        const angle = rotation * Math.PI * 2 / ROTATIONS;
-        const leafSize = sizes[size];
-        ctx.save();
-        ctx.translate(cellX + TILE / 2, cellY + TILE / 2);
-        ctx.rotate(angle);
-        ctx.drawImage(colouredLeaves[colour], -leafSize / 2, -leafSize / 2, leafSize, leafSize);
-        ctx.restore();
-        sprite++;
-      }
-    }
+async function toBitmap(image) {
+  if (!('createImageBitmap' in window)) return image;
+  try {
+    return await createImageBitmap(image);
+  } catch {
+    return image;
   }
-
-  return atlas;
 }
 
-function buildFilledTargets() {
-  const mask = document.createElement('canvas');
-  mask.width = ZONE_W;
-  mask.height = BASE_H;
-  const ctx = mask.getContext('2d', { willReadFrequently: true });
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.font = digitFont;
-
-  for (let digit = 0; digit <= 9; digit++) {
-    ctx.clearRect(0, 0, mask.width, mask.height);
-    ctx.fillStyle = '#fff';
-    ctx.fillText(String(digit), ZONE_W / 2, DIGIT_Y);
-
-    const pixels = ctx.getImageData(0, 0, mask.width, mask.height).data;
-    const candidates = [];
-    const spacing = CFG.maskSpacing;
-
-    for (let row = 0, py = 3; py < mask.height - 3; row++, py += spacing) {
-      const offset = row & 1 ? spacing / 2 : 0;
-      for (let px = 3 + offset; px < mask.width - 3; px += spacing) {
-        const sampleX = Math.round(px);
-        const sampleY = Math.round(py);
-        const alpha = pixels[(sampleY * mask.width + sampleX) * 4 + 3];
-        if (alpha > 110) candidates.push([px - ZONE_W / 2, py - DIGIT_Y]);
-      }
-    }
-
-    const random = seededRandom(9001 + digit * 311);
-    for (let i = candidates.length - 1; i > 0; i--) {
-      const j = Math.floor(random() * (i + 1));
-      const temp = candidates[i];
-      candidates[i] = candidates[j];
-      candidates[j] = temp;
-    }
-
-    const chosen = new Array(PARTICLES_PER_ZONE);
-    const step = candidates.length / PARTICLES_PER_ZONE;
-    for (let i = 0; i < PARTICLES_PER_ZONE; i++) {
-      chosen[i] = candidates[Math.floor(i * step) % candidates.length];
-    }
-    targetsByDigit[digit] = chosen;
+async function loadOptionalFont(name, url, cssValue) {
+  if (!('FontFace' in window)) return false;
+  try {
+    const face = new FontFace(name, `url(${url})`);
+    await face.load();
+    document.fonts.add(face);
+    if (name === 'ClockFooter') footerFont = `${cssValue}px "${name}"`;
+    if (name === 'ClockSide') sideFont = `${cssValue}px "${name}"`;
+    return true;
+  } catch {
+    return false;
   }
 }
 
 function initialiseParticles() {
-  const random = seededRandom(20260716);
+  const random = seededRandom(20260717);
   for (let zone = 0; zone < 4; zone++) {
     const centreX = zone * ZONE_W + ZONE_W / 2;
     for (let i = 0; i < PARTICLES_PER_ZONE; i++) {
       const index = zone * PARTICLES_PER_ZONE + i;
       x[index] = centreX + (random() - 0.5) * 180;
-      y[index] = DIGIT_Y + (random() - 0.5) * 250;
+      y[index] = DIGIT_Y + (random() - 0.5) * 240;
       tx[index] = x[index];
       ty[index] = y[index];
       phase[index] = random() * Math.PI * 2;
-      spin[index] = 0.35 + random() * 0.75;
-      baseRot[index] = Math.floor(random() * ROTATIONS);
-      colourIndex[index] = Math.floor(random() * LEAF_COLOURS.length);
+      spin[index] = 0.35 + random() * 0.8;
+      baseRotation[index] = Math.floor(random() * LEAF_ROTATIONS);
+      colourIndex[index] = Math.floor(random() * LEAF_COLOURS);
       const q = random();
-      sizeIndex[index] = q < 0.18 ? 0 : q < 0.62 ? 1 : q < 0.9 ? 2 : 3;
+      sizeIndex[index] = q < 0.16 ? 0 : q < 0.58 ? 1 : q < 0.9 ? 2 : 3;
     }
   }
 }
 
-function assignDigit(zone, digit, snap) {
-  const points = targetsByDigit[digit];
+function getDigitTargets(digit) {
+  const all = targetData.targets[Number(digit)];
+  if (PARTICLES_PER_ZONE === all.length) return all;
+  const chosen = new Array(PARTICLES_PER_ZONE);
+  const step = all.length / PARTICLES_PER_ZONE;
+  for (let i = 0; i < PARTICLES_PER_ZONE; i++) {
+    chosen[i] = all[Math.floor(i * step) % all.length];
+  }
+  return chosen;
+}
+
+function assignDigit(zone, digit, snap, nowMs) {
+  const points = getDigitTargets(digit);
   const random = seededRandom(411 + zone * 1009 + Number(digit) * 97);
   const centreX = zone * ZONE_W + ZONE_W / 2;
   const start = zone * PARTICLES_PER_ZONE;
+
+  previousDigits[zone] = currentDigits[zone] || String(digit);
+  currentDigits[zone] = String(digit);
+  transitionStarted[zone] = snap ? nowMs - TRANSITION_MS : nowMs;
 
   for (let i = 0; i < PARTICLES_PER_ZONE; i++) {
     const index = start + i;
@@ -233,36 +218,56 @@ function assignDigit(zone, digit, snap) {
       vy[index] = 0;
     }
   }
-
-  currentDigits[zone] = String(digit);
 }
 
-function drawStaticLayer(now) {
-  staticCtx.fillStyle = BG;
-  staticCtx.fillRect(0, 0, BASE_W, BASE_H);
-  staticCtx.textAlign = 'center';
-  staticCtx.textBaseline = 'middle';
-  staticCtx.font = digitFont;
-  staticCtx.lineWidth = 0.75;
+function triggerHeartbeat(nowMs) {
+  heartbeatStarted = nowMs;
+  heartbeatSequence++;
+}
+
+function heartbeatValue(nowMs) {
+  const elapsed = nowMs - heartbeatStarted;
+  if (elapsed < 0 || elapsed >= HEARTBEAT.durationMs) return 0;
+  const linear = 1 - elapsed / HEARTBEAT.durationMs;
+  const reducedPeak = linear * HEARTBEAT.peak;
+  return Math.pow(reducedPeak, HEARTBEAT.curve);
+}
+
+function updateClock(force, nowMs) {
+  const now = new Date();
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const digits = [hours[0], hours[1], minutes[0], minutes[1]];
+  const second = now.getSeconds();
+  let redrawLayout = force;
+
+  if (force || second !== lastSecond) {
+    lastSecond = second;
+    triggerHeartbeat(nowMs);
+    redrawLayout = true;
+  }
 
   for (let zone = 0; zone < 4; zone++) {
-    const centreX = zone * ZONE_W + ZONE_W / 2;
-    for (let layer = 0; layer < CFG.blueprintLayers; layer++) {
-      const angle = zone * 2.1 + layer * 1.7;
-      const offsetX = Math.sin(angle) * layer * 2.6;
-      const offsetY = Math.cos(angle * 0.8) * layer * 1.7;
-      staticCtx.strokeStyle = `rgba(188,198,195,${0.055 + layer * 0.012})`;
-      staticCtx.strokeText(currentDigits[zone], Math.round(centreX + offsetX), Math.round(DIGIT_Y + offsetY));
+    if (force || digits[zone] !== currentDigits[zone]) {
+      assignDigit(zone, digits[zone], force, nowMs);
     }
   }
 
-  staticCtx.strokeStyle = 'rgba(255,255,255,0.07)';
+  if (redrawLayout) drawLayout(now);
+}
+
+function drawLayout(now) {
+  layoutCtx.fillStyle = BG;
+  layoutCtx.fillRect(0, 0, BASE_W, BASE_H);
+
+  layoutCtx.strokeStyle = 'rgba(255,255,255,0.07)';
+  layoutCtx.lineWidth = 1;
   for (let i = 1; i < 4; i++) {
     const dividerX = Math.round(i * ZONE_W) + 0.5;
-    staticCtx.beginPath();
-    staticCtx.moveTo(dividerX, 0);
-    staticCtx.lineTo(dividerX, BASE_H);
-    staticCtx.stroke();
+    layoutCtx.beginPath();
+    layoutCtx.moveTo(dividerX, 0);
+    layoutCtx.lineTo(dividerX, BASE_H);
+    layoutCtx.stroke();
   }
 
   const hours = String(now.getHours()).padStart(2, '0');
@@ -273,70 +278,124 @@ function drawStaticLayer(now) {
   const days = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'];
   const date = `${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()} ${days[now.getDay()]}`;
 
-  staticCtx.fillStyle = '#fff';
-  staticCtx.font = footerFont;
-  staticCtx.textAlign = 'left';
-  staticCtx.textBaseline = 'alphabetic';
+  layoutCtx.fillStyle = '#fff';
+  layoutCtx.font = footerFont;
+  layoutCtx.textAlign = 'left';
+  layoutCtx.textBaseline = 'alphabetic';
   for (let zone = 0; zone < 4; zone++) {
-    staticCtx.fillText(time, zone * ZONE_W + 20, BASE_H - 15);
+    layoutCtx.fillText(time, zone * ZONE_W + 20, BASE_H - 15);
   }
 
-  staticCtx.fillStyle = '#BBC6C3';
-  staticCtx.font = sideFont;
+  layoutCtx.fillStyle = '#BBC6C3';
+  layoutCtx.font = sideFont;
   for (let zone = 0; zone < 4; zone++) {
     const sideX = zone * ZONE_W + ZONE_W - 18;
-    staticCtx.save();
-    staticCtx.translate(sideX, 20);
-    staticCtx.rotate(-Math.PI / 2);
-    staticCtx.textAlign = 'right';
-    staticCtx.textBaseline = 'middle';
-    staticCtx.fillText('MELBOURNE, AUSTRALIA', 0, 0);
-    staticCtx.restore();
+    layoutCtx.save();
+    layoutCtx.translate(sideX, 20);
+    layoutCtx.rotate(-Math.PI / 2);
+    layoutCtx.textAlign = 'right';
+    layoutCtx.textBaseline = 'middle';
+    layoutCtx.fillText('MELBOURNE, AUSTRALIA', 0, 0);
+    layoutCtx.restore();
 
-    staticCtx.save();
-    staticCtx.translate(sideX, BASE_H - 20);
-    staticCtx.rotate(-Math.PI / 2);
-    staticCtx.textAlign = 'left';
-    staticCtx.textBaseline = 'middle';
-    staticCtx.fillText(date, 0, 0);
-    staticCtx.restore();
+    layoutCtx.save();
+    layoutCtx.translate(sideX, BASE_H - 20);
+    layoutCtx.rotate(-Math.PI / 2);
+    layoutCtx.textAlign = 'left';
+    layoutCtx.textBaseline = 'middle';
+    layoutCtx.fillText(date, 0, 0);
+    layoutCtx.restore();
   }
 }
 
-function updateClock(force) {
-  const now = new Date();
-  const hours = String(now.getHours()).padStart(2, '0');
-  const minutes = String(now.getMinutes()).padStart(2, '0');
-  const digits = [hours[0], hours[1], minutes[0], minutes[1]];
-  const second = now.getSeconds();
-  let redrawStatic = force;
+function drawOutlineSprite(source, digit, centreX, centreY, offsetX, offsetY, rotation, scale, alpha) {
+  if (alpha <= 0.001) return;
+  const cos = Math.cos(rotation) * scale;
+  const sin = Math.sin(rotation) * scale;
+  blueprintCtx.setTransform(cos, sin, -sin, cos, centreX + offsetX, centreY + offsetY);
+  blueprintCtx.globalAlpha = alpha;
+  blueprintCtx.drawImage(
+    source,
+    Number(digit) * OUTLINE_TILE_W, 0, OUTLINE_TILE_W, OUTLINE_TILE_H,
+    -OUTLINE_TILE_W / 2, -OUTLINE_TILE_H / 2, OUTLINE_TILE_W, OUTLINE_TILE_H
+  );
+}
 
-  if (force || second !== lastSecond) {
-    lastSecond = second;
-    pulse = 1;
-    redrawStatic = true;
-  }
+function drawBlueprints(nowMs) {
+  const start = DEBUG ? performance.now() : 0;
+  blueprintCtx.setTransform(1, 0, 0, 1, 0, 0);
+  blueprintCtx.globalAlpha = 1;
+  blueprintCtx.clearRect(0, 0, BASE_W, BASE_H);
 
   for (let zone = 0; zone < 4; zone++) {
-    if (force || digits[zone] !== currentDigits[zone]) {
-      assignDigit(zone, digits[zone], force);
-      redrawStatic = true;
+    const centreX = zone * ZONE_W + ZONE_W / 2;
+    const progress = Math.min(1, Math.max(0, (nowMs - transitionStarted[zone]) / TRANSITION_MS));
+    const incoming = 1 - Math.pow(1 - progress, 2);
+    const outgoing = Math.pow(1 - progress, 2);
+    const transitionWave = Math.sin(Math.PI * progress);
+    const shake = 1 + transitionWave * 1.2;
+
+    for (let layer = 0; layer < CFG.blueprintLayers; layer++) {
+      const layerRatio = layer / Math.max(1, CFG.blueprintLayers - 1);
+      const layerPhase = layer * 1.73 + zone * 0.91;
+      const motionTime = nowMs * 0.00082;
+      const fadeWave = 0.5 + 0.5 * Math.sin(nowMs * 0.00105 + layerPhase * 1.91);
+      const fade = 0.75 + 0.25 * fadeWave;
+      const amplitude = (2.0 + layerRatio * OUTLINE_OFFSET) * shake;
+      const offsetX = (
+        Math.sin(motionTime * (1 + layer * 0.012) + layerPhase) +
+        Math.sin(motionTime * 0.43 + layerPhase * 2.1) * 0.35
+      ) * amplitude;
+      const offsetY = (
+        Math.cos(motionTime * 0.87 + layerPhase * 1.27) +
+        Math.sin(motionTime * 0.34 + layerPhase) * 0.30
+      ) * amplitude * 0.72;
+      const rotation = Math.sin(motionTime * 0.73 + layerPhase * 0.77) * OUTLINE_ROTATION * (0.45 + layerRatio * 0.55) * shake;
+      const scale = 1 + Math.sin(motionTime * 0.62 + layerPhase * 1.13) * OUTLINE_SCALE * (0.45 + layerRatio * 0.55);
+      // Original p5 version used alpha 20..50 out of 255 across 15 layers.
+      const baseAlpha = (0.200 + layerRatio * 0.200) * fade;
+
+      if (outgoing > 0.002 && previousDigits[zone]) {
+        drawOutlineSprite(outlineGrey, previousDigits[zone], centreX, DIGIT_Y, offsetX, offsetY, rotation, scale, baseAlpha * outgoing);
+      }
+      drawOutlineSprite(outlineGrey, currentDigits[zone], centreX, DIGIT_Y, offsetX, offsetY, rotation, scale, baseAlpha * incoming);
+
+      if (transitionWave > 0.01) {
+        drawOutlineSprite(
+          outlineGreen,
+          currentDigits[zone],
+          centreX,
+          DIGIT_Y,
+          -offsetX * 0.75,
+          offsetY * 0.65,
+          -rotation * 0.85,
+          scale,
+          baseAlpha * transitionWave * 0.75
+        );
+      }
     }
   }
 
-  if (redrawStatic) drawStaticLayer(now);
+  blueprintCtx.setTransform(1, 0, 0, 1, 0, 0);
+  blueprintCtx.globalAlpha = 1;
+  if (DEBUG) blueprintDrawAverage = blueprintDrawAverage * 0.94 + (performance.now() - start) * 0.06;
 }
 
 function updateParticles(deltaFrames, nowMs) {
   const slowRadius = 58;
-  const maxSpeed = 4;
-  const steering = 0.145;
-  const damping = 0.875;
-  const impulse = pulse * 0.16;
+  const maxSpeed = CFG.maxSpeed;
+  const steering = CFG.steering;
+  const damping = HEARTBEAT.settleDamping;
+  const drift = CFG.driftAmount;
+  const heartbeat = heartbeatValue(nowMs);
+  const heartbeatForce = heartbeat * HEARTBEAT.joltForce;
+  const heartbeatPhase = heartbeatSequence * 1.61803398875;
 
-  for (let index = 0; index < TOTAL_PARTICLES; index++) {
-    const deltaX = tx[index] - x[index];
-    const deltaY = ty[index] - y[index];
+  for (let i = 0; i < TOTAL_PARTICLES; i++) {
+    const driftX = Math.sin(nowMs * 0.00052 + phase[i]) * drift;
+    const driftY = Math.cos(nowMs * 0.00043 + phase[i] * 1.31) * drift * 0.85;
+    const deltaX = tx[i] + driftX - x[i];
+    const deltaY = ty[i] + driftY - y[i];
     const distanceSquared = deltaX * deltaX + deltaY * deltaY;
 
     if (distanceSquared > 0.04) {
@@ -344,44 +403,67 @@ function updateParticles(deltaFrames, nowMs) {
       const speed = distance < slowRadius ? maxSpeed * distance / slowRadius : maxSpeed;
       const desiredX = deltaX / distance * speed;
       const desiredY = deltaY / distance * speed;
-      vx[index] += (desiredX - vx[index]) * steering;
-      vy[index] += (desiredY - vy[index]) * steering;
+      vx[i] += (desiredX - vx[i]) * steering;
+      vy[i] += (desiredY - vy[i]) * steering;
     }
 
-    if (impulse > 0.003) {
-      const angle = phase[index] + nowMs * 0.00065;
-      vx[index] += Math.cos(angle) * impulse;
-      vy[index] += Math.sin(angle * 1.17) * impulse;
+    if (heartbeatForce > 0.001) {
+      const angle = phase[i] + heartbeatPhase;
+      vx[i] += Math.cos(angle) * heartbeatForce * deltaFrames;
+      vy[i] += Math.sin(angle * 1.17) * heartbeatForce * deltaFrames;
     }
 
-    x[index] += vx[index] * deltaFrames;
-    y[index] += vy[index] * deltaFrames;
-    vx[index] *= damping;
-    vy[index] *= damping;
+    x[i] += vx[i] * deltaFrames;
+    y[i] += vy[i] * deltaFrames;
+    vx[i] *= damping;
+    vy[i] *= damping;
   }
 }
 
-function atlasIndex(colour, size, rotation) {
-  return (colour * CFG.leafSizes.length + size) * ROTATIONS + rotation;
+function leafAtlasIndex(colour, size, pulseLevel, rotation) {
+  return (((colour * LEAF_SIZES + size) * LEAF_PULSE_LEVELS + pulseLevel) * LEAF_ROTATIONS + rotation);
 }
 
 function drawLeaves(nowMs) {
-  const debugDrawStart = DEBUG ? performance.now() : 0;
+  const start = DEBUG ? performance.now() : 0;
   leafCtx.clearRect(0, 0, BASE_W, BASE_H);
-  const rotationTick = Math.floor(nowMs / 180);
+  const pulse = heartbeatValue(nowMs);
+  const pulseScale = 1 + pulse * HEARTBEAT.scaleBoost;
+  const rotationTick = Math.floor(nowMs / 170);
+  const drawSize = LEAF_TILE * pulseScale;
+  const halfDrawSize = drawSize / 2;
 
-  for (let index = 0; index < TOTAL_PARTICLES; index++) {
-    const rotation = (baseRot[index] + Math.floor(rotationTick * spin[index])) % ROTATIONS;
-    const sprite = atlasIndex(colourIndex[index], sizeIndex[index], rotation);
-    const sourceX = (sprite % ATLAS_COLS) * TILE;
-    const sourceY = Math.floor(sprite / ATLAS_COLS) * TILE;
+  for (let i = 0; i < TOTAL_PARTICLES; i++) {
+    const rotation = (baseRotation[i] + Math.floor(rotationTick * spin[i])) % LEAF_ROTATIONS;
+    // Always use the normal atlas frame. Heartbeat scaling is continuous at draw time.
+    const sprite = leafAtlasIndex(colourIndex[i], sizeIndex[i], 0, rotation);
+    const sourceX = (sprite % LEAF_ATLAS_COLS) * LEAF_TILE;
+    const sourceY = Math.floor(sprite / LEAF_ATLAS_COLS) * LEAF_TILE;
     leafCtx.drawImage(
-      atlasSource,
-      sourceX, sourceY, TILE, TILE,
-      Math.round(x[index] - TILE / 2), Math.round(y[index] - TILE / 2), TILE, TILE
+      leafAtlas,
+      sourceX, sourceY, LEAF_TILE, LEAF_TILE,
+      Math.round(x[i] - halfDrawSize), Math.round(y[i] - halfDrawSize), drawSize, drawSize
     );
   }
-  if (DEBUG) debugDrawAverage = debugDrawAverage * 0.94 + (performance.now() - debugDrawStart) * 0.06;
+
+  if (DEBUG) leafDrawAverage = leafDrawAverage * 0.94 + (performance.now() - start) * 0.06;
+}
+
+function updateDebug(nowMs) {
+  if (!DEBUG) return;
+  debugFrames++;
+  if (nowMs - debugStarted >= 1000) {
+    const fps = debugFrames * 1000 / (nowMs - debugStarted);
+    window.clockStats = {
+      fps: Number(fps.toFixed(1)),
+      leafMs: Number(leafDrawAverage.toFixed(2)),
+      blueprintMs: Number(blueprintDrawAverage.toFixed(2)),
+      leaves: TOTAL_PARTICLES
+    };
+    debugElement.textContent = `${fps.toFixed(0)} fps · leaves ${leafDrawAverage.toFixed(1)} ms · lines ${blueprintDrawAverage.toFixed(1)} ms · ${TOTAL_PARTICLES} leaves`;
+    debugFrames = 0;
+    debugStarted = nowMs;
+  }
 }
 
 function animationLoop(nowMs) {
@@ -391,50 +473,47 @@ function animationLoop(nowMs) {
   const deltaFrames = Math.min(2, (nowMs - lastFrame) / FRAME_MS || 1);
   lastFrame = nowMs - (nowMs - lastFrame) % FRAME_MS;
 
-  updateClock(false);
+  updateClock(false, nowMs);
   updateParticles(deltaFrames, nowMs);
+  drawBlueprints(nowMs);
   drawLeaves(nowMs);
-  pulse *= 0.79;
-
-  if (DEBUG) {
-    debugFrames++;
-    if (nowMs - debugStart >= 1000) {
-      const fps = debugFrames * 1000 / (nowMs - debugStart);
-      debugElement.textContent = `${fps.toFixed(0)} fps · ${debugDrawAverage.toFixed(1)} ms draw · ${TOTAL_PARTICLES} leaves`;
-      debugFrames = 0;
-      debugStart = nowMs;
-    }
-  }
+  updateDebug(nowMs);
 }
 
 async function start() {
-  await Promise.all([
-    loadFont('ClockMain', 'MP-B.ttf'),
-    loadFont('ClockFooter', 'MS-Bk.otf'),
-    loadFont('ClockSide', 'MP-M.ttf')
+  targetData = window.DIGIT_ASSETS;
+  if (!targetData || !targetData.targets) throw new Error('Digit target data is missing');
+
+  const [greyImage, greenImage, leafImage] = await Promise.all([
+    loadImage('digit_outlines_grey.png'),
+    loadImage('digit_outlines_green.png'),
+    loadImage('leaf_atlas.png')
   ]);
 
-  leafImage = await loadImage('sprite_32.png');
-  buildFilledTargets();
+  [outlineGrey, outlineGreen, leafAtlas] = await Promise.all([
+    toBitmap(greyImage),
+    toBitmap(greenImage),
+    toBitmap(leafImage)
+  ]);
+
+  await Promise.all([
+    loadOptionalFont('ClockFooter', 'MS-Bk.otf', 20),
+    loadOptionalFont('ClockSide', 'MP-M.ttf', 8)
+  ]);
+
   initialiseParticles();
-
-  const atlas = buildAtlas();
-  if ('createImageBitmap' in window) {
-    try {
-      atlasSource = await createImageBitmap(atlas);
-    } catch {
-      atlasSource = atlas;
-    }
-  } else {
-    atlasSource = atlas;
-  }
-
-  updateClock(true);
-  drawLeaves(performance.now());
+  const nowMs = performance.now();
+  updateClock(true, nowMs);
+  drawBlueprints(nowMs);
+  drawLeaves(nowMs);
   requestAnimationFrame(animationLoop);
 }
 
-start().catch(() => {
-  staticCtx.fillStyle = BG;
-  staticCtx.fillRect(0, 0, BASE_W, BASE_H);
+start().catch(error => {
+  layoutCtx.fillStyle = BG;
+  layoutCtx.fillRect(0, 0, BASE_W, BASE_H);
+  if (DEBUG) {
+    debugElement.hidden = false;
+    debugElement.textContent = `Clock failed to start: ${error.message}`;
+  }
 });

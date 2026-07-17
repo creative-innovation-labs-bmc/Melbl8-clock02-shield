@@ -27,6 +27,10 @@ canvas {
   height: 100%;
 }
 
+#layout-layer { z-index: 0; }
+#blueprint-layer { z-index: 1; }
+#leaf-layer { z-index: 2; }
+
 #debug {
   position: fixed;
   top: 8px;
@@ -34,7 +38,7 @@ canvas {
   z-index: 10;
   padding: 6px 8px;
   border-radius: 4px;
-  background: rgba(0,0,0,0.72);
+  background: rgba(0,0,0,0.75);
   color: #fff;
   font: 12px/1.2 monospace;
   pointer-events: none;

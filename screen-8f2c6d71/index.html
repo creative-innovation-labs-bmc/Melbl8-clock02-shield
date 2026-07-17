@@ -6,16 +6,18 @@
   <meta name="robots" content="noindex,nofollow,noarchive,nosnippet,noimageindex">
   <meta name="googlebot" content="noindex,nofollow,noarchive,nosnippet,noimageindex">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Screen</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <main id="stage" aria-label="Particle clock">
-    <canvas id="static-layer" width="1920" height="402"></canvas>
+    <canvas id="layout-layer" width="1920" height="402"></canvas>
+    <canvas id="blueprint-layer" width="1920" height="402"></canvas>
     <canvas id="leaf-layer" width="1920" height="402"></canvas>
   </main>
   <div id="debug" hidden></div>
+  <script src="digit_targets.js"></script>
   <script src="clock.js"></script>
 </body>
 </html>
