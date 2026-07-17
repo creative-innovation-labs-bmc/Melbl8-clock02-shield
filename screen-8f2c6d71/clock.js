@@ -71,7 +71,7 @@ const HEARTBEAT = {
   peak: 0.72,            // Master intensity. Try 0.50 to 0.85.
   curve: 3.0,            // Higher = sharper/faster falloff. Try 2.0 to 4.5.
   scaleBoost: 0.55,      // Leaf size growth. Effective visible growth is about 20% with peak 0.72.
-  joltForce: 4.4,        // Leaf movement away from targets. Try 2.0 to 6.0.
+  joltForce: 6.0,        // Leaf movement away from targets. Try 2.0 to 6.0.
   settleDamping: 0.84    // Lower settles faster. Try 0.78 to 0.90.
 };
 
