@@ -46,8 +46,8 @@ const ZONE_W = BASE_W / 4;
 // y: 232 means the number centre sits at 464 px on the physical wall.
 // ============================================================
 const NUMBER_LAYOUT = {
-  scale: 0.87, // 90% of the previous number size
-  y: 222       // 10 internal px lower, equal to 20 px on the wall
+  scale: 0.88, // 90% of the previous number size
+  y: 216       // 10 internal px lower, equal to 20 px on the wall
 };
 
 window.NUMBER_LAYOUT_CONFIG = NUMBER_LAYOUT;
