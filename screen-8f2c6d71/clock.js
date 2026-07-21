@@ -47,7 +47,7 @@ const ZONE_W = BASE_W / 4;
 // ============================================================
 const NUMBER_LAYOUT = {
   scale: 0.88, // 90% of the previous number size
-  y: 216       // 10 internal px lower, equal to 20 px on the wall
+  y: 220       // 10 internal px lower, equal to 20 px on the wall
 };
 
 window.NUMBER_LAYOUT_CONFIG = NUMBER_LAYOUT;
