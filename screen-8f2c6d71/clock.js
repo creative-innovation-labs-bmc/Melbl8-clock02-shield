@@ -40,7 +40,17 @@ const CFG = PROFILES[PROFILE];
 const BASE_W = 1920;
 const BASE_H = 402;
 const ZONE_W = BASE_W / 4;
-const DIGIT_Y = 222; // lowered to prevent the top of tall digits being clipped
+// ============================================================
+// NUMBER LAYOUT TUNING
+// Internal canvas is 1920 x 402 and is doubled to 3840 x 804.
+// y: 232 means the number centre sits at 464 px on the physical wall.
+// ============================================================
+const NUMBER_LAYOUT = {
+  scale: 0.90, // 90% of the previous number size
+  y: 232       // 10 internal px lower, equal to 20 px on the wall
+};
+
+window.NUMBER_LAYOUT_CONFIG = NUMBER_LAYOUT;
 const FRAME_MS = 1000 / CFG.targetFps;
 const PARTICLES_PER_ZONE = CFG.particlesPerZone;
 const TOTAL_PARTICLES = PARTICLES_PER_ZONE * 4;
@@ -71,7 +81,7 @@ const HEARTBEAT = {
   peak: 0.72,            // Master intensity. Try 0.50 to 0.85.
   curve: 3.0,            // Higher = sharper/faster falloff. Try 2.0 to 4.5.
   scaleBoost: 0.55,      // Leaf size growth. Effective visible growth is about 20% with peak 0.72.
-  joltForce: 6.0,        // Leaf movement away from targets. Try 2.0 to 6.0.
+  joltForce: 4.4,        // Leaf movement away from targets. Try 2.0 to 6.0.
   settleDamping: 0.84    // Lower settles faster. Try 0.78 to 0.90.
 };
 
@@ -121,6 +131,14 @@ let leafDrawAverage = 0;
 let blueprintDrawAverage = 0;
 window.clockStats = { fps: 0, leafMs: 0, blueprintMs: 0, leaves: TOTAL_PARTICLES };
 window.forceHeartbeat = () => triggerHeartbeat(performance.now());
+window.applyNumberLayout = () => {
+  const nowMs = performance.now();
+  for (let zone = 0; zone < 4; zone++) {
+    if (currentDigits[zone]) assignDigit(zone, currentDigits[zone], true, nowMs);
+  }
+  drawBlueprints(nowMs);
+  drawLeaves(nowMs);
+};
 if (DEBUG) debugElement.hidden = false;
 
 function seededRandom(seed) {
@@ -172,7 +190,7 @@ function initialiseParticles() {
     for (let i = 0; i < PARTICLES_PER_ZONE; i++) {
       const index = zone * PARTICLES_PER_ZONE + i;
       x[index] = centreX + (random() - 0.5) * 180;
-      y[index] = DIGIT_Y + (random() - 0.5) * 240;
+      y[index] = NUMBER_LAYOUT.y + (random() - 0.5) * 240 * NUMBER_LAYOUT.scale;
       tx[index] = x[index];
       ty[index] = y[index];
       phase[index] = random() * Math.PI * 2;
@@ -209,8 +227,8 @@ function assignDigit(zone, digit, snap, nowMs) {
   for (let i = 0; i < PARTICLES_PER_ZONE; i++) {
     const index = start + i;
     const point = points[i];
-    tx[index] = centreX + point[0] + (random() - 0.5) * 5;
-    ty[index] = DIGIT_Y + point[1] + (random() - 0.5) * 5;
+    tx[index] = centreX + point[0] * NUMBER_LAYOUT.scale + (random() - 0.5) * 5;
+    ty[index] = NUMBER_LAYOUT.y + point[1] * NUMBER_LAYOUT.scale + (random() - 0.5) * 5;
     if (snap) {
       x[index] = tx[index];
       y[index] = ty[index];
@@ -351,21 +369,21 @@ function drawBlueprints(nowMs) {
         Math.sin(motionTime * 0.34 + layerPhase) * 0.30
       ) * amplitude * 0.72;
       const rotation = Math.sin(motionTime * 0.73 + layerPhase * 0.77) * OUTLINE_ROTATION * (0.45 + layerRatio * 0.55) * shake;
-      const scale = 1 + Math.sin(motionTime * 0.62 + layerPhase * 1.13) * OUTLINE_SCALE * (0.45 + layerRatio * 0.55);
+      const scale = NUMBER_LAYOUT.scale * (1 + Math.sin(motionTime * 0.62 + layerPhase * 1.13) * OUTLINE_SCALE * (0.45 + layerRatio * 0.55));
       // Original p5 version used alpha 20..50 out of 255 across 15 layers.
       const baseAlpha = (0.200 + layerRatio * 0.200) * fade;
 
       if (outgoing > 0.002 && previousDigits[zone]) {
-        drawOutlineSprite(outlineGrey, previousDigits[zone], centreX, DIGIT_Y, offsetX, offsetY, rotation, scale, baseAlpha * outgoing);
+        drawOutlineSprite(outlineGrey, previousDigits[zone], centreX, NUMBER_LAYOUT.y, offsetX, offsetY, rotation, scale, baseAlpha * outgoing);
       }
-      drawOutlineSprite(outlineGrey, currentDigits[zone], centreX, DIGIT_Y, offsetX, offsetY, rotation, scale, baseAlpha * incoming);
+      drawOutlineSprite(outlineGrey, currentDigits[zone], centreX, NUMBER_LAYOUT.y, offsetX, offsetY, rotation, scale, baseAlpha * incoming);
 
       if (transitionWave > 0.01) {
         drawOutlineSprite(
           outlineGreen,
           currentDigits[zone],
           centreX,
-          DIGIT_Y,
+          NUMBER_LAYOUT.y,
           -offsetX * 0.75,
           offsetY * 0.65,
           -rotation * 0.85,
